@@ -235,6 +235,46 @@ extern const std::unordered_map<std::wstring, std::wstring> codes
 bool translateSelectedOnly = false, useRateLimiter = true, rateLimitSelected = false, useCache = true, useFilter = true;
 int tokenCount = 30, rateLimitTimespan = 60000, maxSentenceSize = 1000;
 
+std::wstring ToRomaji(const std::wstring& text, TranslationParam tlp)
+{
+	try
+	{
+		if (HttpRequest httpRequest{
+			L"Mozilla/5.0 Textractor",
+			L"localhost",
+			L"POST",
+			L"/romanize",
+			FormatString(R"({"text": "%s"})", JSON::Escape(WideStringToString(text))),
+			L"Content-Type: application/json\r\nConnection: close",
+			8080,
+			NULL,
+			WINHTTP_FLAG_ESCAPE_DISABLE,
+		})
+		{
+			if (auto jsonResponse = JSON::Parse(httpRequest.response))
+				if (auto translation = Copy(jsonResponse[L"romanized_text"].String()))
+					return translation.value();
+				else
+					return FormatString(L"%s: %s", TRANSLATION_ERROR, httpRequest.response);
+			else
+				return L"[Romanization server error: Invalid response format]";
+		}
+		else
+		{
+			return L"[Romanization server unavailable]";
+		}
+	}
+	catch (...)
+	{
+		return L"[Romanization error occurred]";
+	}
+}
+
+bool IsJapanese(TranslationParam tlp)
+{
+	return tlp.translateFrom == L"Japanese";
+}
+
 std::pair<bool, std::wstring> Translate(const std::wstring& text, TranslationParam tlp)
 {
 	if (!tlp.authKey.empty())
@@ -247,8 +287,29 @@ std::pair<bool, std::wstring> Translate(const std::wstring& text, TranslationPar
 			FormatString(L"/language/translate/v2?format=text&target=%s&key=%s%s", codes.at(tlp.translateTo), tlp.authKey, translateFromComponent).c_str(),
 			FormatString(R"({"q":["%s"]})", JSON::Escape(WideStringToString(text)))
 		})
-			if (auto translation = Copy(JSON::Parse(httpRequest.response)[L"data"][L"translations"][0][L"translatedText"].String())) return { true, translation.value() };
-			else return { false, FormatString(L"%s: %s", TRANSLATION_ERROR, httpRequest.response) };
+		{
+			std::wstring romanizedText;
+			if (auto jsonResponse = JSON::Parse(httpRequest.response))
+			{
+				if (auto translation = Copy(JSON::Parse(httpRequest.response)[L"data"][L"translations"][0][L"translatedText"].String()))
+				{
+					if (IsJapanese(tlp))
+						romanizedText = ToRomaji(text, tlp);
+					else
+						romanizedText = L"";
+					
+					std::wstring result = FormatString(L"%s\n%s", translation.value(), romanizedText);
+
+					return { true, result };
+				}
+				else return { false, FormatString(L"%s: %s", TRANSLATION_ERROR, httpRequest.response) };
+			}
+			else return { false, FormatString(L"%s: %s", TRANSLATION_ERROR, httpRequest.errorCode) };
+
+			// Original implementation commented out
+			// if (auto translation = Copy(JSON::Parse(httpRequest.response)[L"data"][L"translations"][0][L"translatedText"].String())) return { true, translation.value() };
+			// else return { false, FormatString(L"%s: %s", TRANSLATION_ERROR, httpRequest.response) };
+		}
 		else return { false, FormatString(L"%s (code=%u)", TRANSLATION_ERROR, httpRequest.errorCode) };
 	}
 
@@ -260,8 +321,17 @@ std::pair<bool, std::wstring> Translate(const std::wstring& text, TranslationPar
 	})
 	{
 		auto start = httpRequest.response.find(L"result-container\">"), end = httpRequest.response.find(L'<', start);
-		if (end != std::string::npos) return { true, HTML::Unescape(httpRequest.response.substr(start + 18, end - start - 18)) };
-		return { false, FormatString(L"%s: %s", TRANSLATION_ERROR, httpRequest.response) };
+		// if (end != std::string::npos) return { true, HTML::Unescape(httpRequest.response.substr(start + 18, end - start - 18)) };
+		// return { false, FormatString(L"%s: %s", TRANSLATION_ERROR, httpRequest.response) };
+
+		if (end != std::string::npos)
+		{
+			std::wstring translation = HTML::Unescape(httpRequest.response.substr(start + 18, end - start - 18));
+			if (IsJapanese(tlp))
+				translation += L"\n" + ToRomaji(text, tlp);
+			return { true, translation };
+		}
+		else return { false, FormatString(L"%s: %s", TRANSLATION_ERROR, httpRequest.response) };
 	}
 	else return { false, FormatString(L"%s (code=%u)", TRANSLATION_ERROR, httpRequest.errorCode) };
 }
